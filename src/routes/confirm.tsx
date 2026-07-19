@@ -103,6 +103,61 @@ function ConfirmPage() {
     }
   }, []);
 
+  // Debounced forward-geocoding: when the user types an address, look it up and move the pin.
+  useEffect(() => {
+    const address = spec.origin_address.trim();
+    if (!address) return;
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as Array<{ lat: string; lon: string }>;
+        if (!data.length) return;
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+        setSpec((s) =>
+          s.origin_lat === lat && s.origin_lng === lng
+            ? s
+            : { ...s, origin_lat: lat, origin_lng: lng },
+        );
+      } catch {
+        // ignore
+      }
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [spec.origin_address]);
+
+  useEffect(() => {
+    const address = spec.destination_address.trim();
+    if (!address) return;
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as Array<{ lat: string; lon: string }>;
+        if (!data.length) return;
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+        setSpec((s) =>
+          s.destination_lat === lat && s.destination_lng === lng
+            ? s
+            : { ...s, destination_lat: lat, destination_lng: lng },
+        );
+      } catch {
+        // ignore
+      }
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [spec.destination_address]);
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
