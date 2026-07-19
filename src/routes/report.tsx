@@ -121,6 +121,23 @@ function ReportPage() {
     );
   }
 
+  if (report.ranked_companies.length === 0) {
+    return (
+      <div>
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold tracking-tight text-foreground">Report</h1>
+          <p className="mt-1 text-sm text-muted-foreground">No quotes collected yet.</p>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-8 text-center">
+          <p className="text-sm text-foreground/80">{report.summary}</p>
+          <p className="mt-4 text-sm text-muted-foreground">
+            The Negotiator is still calling movers. Check back shortly.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const recommended = report.ranked_companies.find((c) => c.recommended) ?? report.ranked_companies[0];
 
   return (
