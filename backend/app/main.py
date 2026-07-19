@@ -36,16 +36,23 @@ app.include_router(results.router)
 # ---------------------------------------------------------------------------
 
 @app.websocket("/media-stream/{company_name:path}")
-async def media_stream(websocket: WebSocket, company_name: str = "Provider"):
+async def media_stream(
+    websocket: WebSocket,
+    company_name: str = "Provider",
+    job_spec_id: str = "",
+    service_description: str = "home improvement services",
+):
     """WebSocket endpoint for Twilio's <Stream> tag.
 
-    Twilio sends base64 μ-law audio chunks; we transcribe, respond, and
-    speak back via ElevenLabs TTS — all in real-time over this connection.
+    Query params (job_spec_id, company_name, service_description) flow
+    from the TwiML URL through to StreamHandler for LLM context.
     """
+    from urllib.parse import unquote
     summary = await handle_media_stream(
         websocket=websocket,
-        company_name=company_name,
-        service_description="home improvement services",
+        company_name=unquote(company_name),
+        service_description=unquote(service_description),
+        job_spec_id=unquote(job_spec_id),
     )
     # summary is logged server-side; in production, persist to DB
 

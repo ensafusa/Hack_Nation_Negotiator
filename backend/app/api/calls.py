@@ -35,6 +35,7 @@ from app.models.voice import (
     StoredCallArtifact,
     WebhookProcessingResult,
 )
+from app.clients import twilio_client
 from app.services import extraction, telephony, voice_service
 from app.services.webhook_service import InvalidWebhookPayloadError, WebhookProcessor
 from app.store import job_specs, leads, quotes
@@ -44,11 +45,19 @@ router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 @router.post("/start-negotiating/{job_spec_id}")
 def start_negotiating(job_spec_id: str, stream_webhook_base_url: str):
-    """Loop through this job's leads, skip anyone outside working hours,
-    place a call for everyone else. Real orchestration would queue/retry the
-    skipped ones later rather than dropping them (see P2's scheduler)."""
+    """Search for movers, then call them via Twilio.
+
+    Step 1: Auto-search via Tavily if no leads exist yet.
+    Step 2: For each lead, place an outbound call.
+    If twilio_test_phone is set (free trial), all calls go to that number
+    instead of the leads' real numbers — the AI still negotiates as if
+    speaking to the real company.
+    """
+    from urllib.parse import quote
+
+    from app.services import search_service
+
     spec = job_specs.get(job_spec_id)
-    job_leads = leads.get(job_spec_id, [])
     if not spec:
         raise HTTPException(status_code=404, detail="job_spec not found")
     if not spec.confirmed_by_user:
@@ -56,26 +65,41 @@ def start_negotiating(job_spec_id: str, stream_webhook_base_url: str):
             status_code=400, detail="job_spec not confirmed by user yet"
         )
 
+    # Step 1: Auto-search for movers if no leads exist yet
+    job_leads = leads.get(job_spec_id)
+    if not job_leads:
+        city = search_service.resolve_city(spec.origin_address)
+        job_leads = search_service.find_movers(city)
+        leads[job_spec_id] = job_leads
+
+    wss_base = stream_webhook_base_url.replace("https://", "wss://")
+    use_test_phone = settings.twilio_test_phone
+
     results = []
     for lead in job_leads:
-        if not telephony.is_within_working_hours(lead):
-            results.append(
-                {"company_id": lead.company_id, "status": "outside_hours_skipped"}
-            )
-            continue
+        # Free trial mode: call the test number instead of the real one
+        phone_to_call = use_test_phone or lead.phone_number
 
-        wss_base = stream_webhook_base_url.replace("https://", "wss://")
-        call_sid = telephony.initiate_call(
-            lead,
-            f"{stream_webhook_base_url}/api/calls/stream/{lead.company_id}?wss_url={wss_base}&job_spec_id={job_spec_id}"
+        # URL-safe company name for query-string passthrough
+        safe_name = quote(lead.name, safe="")
+
+        twiml_url = (
+            f"{stream_webhook_base_url}/api/calls/stream/{lead.company_id}"
+            f"?wss_url={wss_base}"
+            f"&job_spec_id={job_spec_id}"
+            f"&company_name={safe_name}"
         )
-        results.append(
-            {"company_id": lead.company_id, "status": "calling", "call_sid": call_sid}
-        )
+        call_sid = twilio_client.place_call(phone_to_call, twiml_url)
+
+        results.append({
+            "company_id": lead.company_id,
+            "company_name": lead.name,
+            "status": "calling",
+            "call_sid": call_sid,
+            "test_mode": bool(use_test_phone),
+        })
 
     return {"job_spec_id": job_spec_id, "results": results}
-
-
 def _lead_name(job_spec_id: str, company_id: str) -> str:
     for lead in leads.get(job_spec_id, []):
         if lead.company_id == company_id:
@@ -83,7 +107,7 @@ def _lead_name(job_spec_id: str, company_id: str) -> str:
     return "Unknown Mover"
 
 
-@router.get("/stream/{company_id}", response_class=PlainTextResponse)
+@router.api_route("/stream/{company_id}", methods=["GET", "POST"], response_class=PlainTextResponse)
 def stream_twiml(
     company_id: str,
     wss_url: str = Query(
@@ -98,14 +122,20 @@ def stream_twiml(
         default="",
         description="ID of the job spec to associate with this call.",
     ),
+    company_name: str = Query(
+        default="Provider",
+        description="Company name for LLM negotiation context.",
+    ),
 ):
     """TwiML endpoint — Twilio fetches this when placing an outbound call.
 
     Returns XML that tells Twilio to open a <Stream> WebSocket to our
     /media-stream endpoint so we can process audio in real-time.
     """
+    from urllib.parse import quote
+
     base = wss_url if wss_url else "wss://localhost:8000"
-    ws_url = f"{base}/media-stream/{company_id}?job_spec_id={job_spec_id}"
+    ws_url = f"{base}/media-stream/{company_id}?job_spec_id={quote(job_spec_id)}&company_name={quote(company_name)}"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>

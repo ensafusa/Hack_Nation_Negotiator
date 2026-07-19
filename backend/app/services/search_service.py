@@ -87,6 +87,33 @@ _AGGREGATOR_DOMAINS = {
 }
 
 
+_GENERIC_TITLE_WORDS = {
+    "best", "top", "affordable", "cheap", "reliable", "professional",
+    "near me", "near by", "local", "trusted", "#1", "# 1",
+    "how to", "guide", "review", "reviews", "compared",
+}
+
+_KNOWN_FAKE_TITLES = {
+    "residential moving company",
+    "commercial moving company",
+    "local moving company",
+    "long distance moving company",
+}
+
+
+def _is_generic_title(title: str) -> bool:
+    """Return True if the title looks like an SEO aggregation/listicle page,
+    not a real moving company name."""
+    lo = title.lower().strip()
+    # Exact match with known fake titles
+    if lo in _KNOWN_FAKE_TITLES:
+        return True
+    # Titles that are just "X Best Moving Companies in Y"
+    if any(w in lo for w in _GENERIC_TITLE_WORDS) and len(lo.split()) <= 8:
+        return True
+    return False
+
+
 def _domain(url: str | None) -> str:
     if not url:
         return ""
@@ -182,6 +209,11 @@ def find_movers(city: str) -> list[Lead]:
     for result in raw_results:
         url = result.get("url")
         if _is_aggregator(url):
+            continue
+
+        # Skip generic SEO titles that aren't real company names
+        title = result.get("title", "")
+        if _is_generic_title(title):
             continue
 
         # Prefer full page text (raw_content) over the short search snippet

@@ -32,14 +32,6 @@ ELEVENLABS_SAMPLE_RATE = 22050
 WHISPER_MODEL = "whisper-1"
 GPT_MODEL = "gpt-4o"
 
-SYSTEM_PROMPT = (
-    "You are an AI negotiator calling a home-improvement provider on behalf of "
-    "a customer. Be polite, professional and persistent. Identify yourself as an "
-    "AI if asked; never claim to be human. Keep responses short --- one or two "
-    "sentences. After you get a price, ask if there is flexibility. If they "
-    "will not budge, accept, thank them, and end with a clear summary."
-)
-
 # ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
@@ -228,17 +220,19 @@ class StreamHandler:
     def __init__(
         self, websocket, stream_sid, call_sid,
         company_name="Provider", service_description="home improvement services",
+        job_spec_id="",
     ):
         self.ws = websocket
         self.stream_sid = stream_sid
         self.call_sid = call_sid
         self.company = company_name
         self.service = service_description
+        self.job_spec_id = job_spec_id
 
         self.vad = VADBuffer()
         self.tts = None
         self._openai = AsyncOpenAI(api_key=settings.openai_api_key)
-        self._history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._history: list[dict] = [{"role": "system", "content": self._build_system_prompt()}]
         self._running = True
 
         self._playing = False
@@ -524,7 +518,81 @@ class StreamHandler:
             "have a great day", "thanks for your help",
         ])
 
-    async def _cleanup(self) -> None:
+    def _build_system_prompt(self) -> str:
+        """Build the LLM system prompt from the playbook + job spec context."""
+        from app.playbook.negotiation_playbook import NEGOTIATION_PLAYBOOK
+        from app.store import job_specs
+
+        playbook = NEGOTIATION_PLAYBOOK
+
+        # Load job spec details if available
+        spec_lines = []
+        if self.job_spec_id:
+            spec = job_specs.get(self.job_spec_id)
+            if spec:
+                spec_lines = [
+                    "",
+                    "JOB SPEC:",
+                    f"  Origin: {spec.origin_address} (floor {spec.origin_floor}, elevator: {spec.origin_has_elevator})",
+                    f"  Destination: {spec.destination_address} (floor {spec.destination_floor}, elevator: {spec.destination_has_elevator})",
+                ]
+                if spec.distance_miles:
+                    spec_lines.append(f"  Distance: {spec.distance_miles} miles")
+                spec_lines.append(f"  Move date: {spec.move_date}")
+                spec_lines.append(f"  Trips: {spec.num_trips}, Bags: {spec.num_bags}")
+                if spec.notes:
+                    spec_lines.append(f"  Notes: {spec.notes}")
+                spec_lines.append("")
+
+        company_info = f"You are calling {self.company} about {self.service}."
+
+        prompt = f"""{playbook['role']}
+
+{company_info}
+Always: {', '.join(playbook['communication_style']['always'])}.
+Never: {', '.join(playbook['communication_style']['never'])}.
+
+{"".join(spec_lines)}PRIMARY OBJECTIVES (in order): {', '.join(playbook['primary_objectives_in_order'])}
+
+CALL STRUCTURE:
+"""
+        for step in playbook['call_structure']:
+            prompt += f"  {step['step']}: {step['instruction']}\n"
+
+        prompt += f"""NEGOTIATION LEVERS:
+  Price flexibility: {playbook['negotiation_levers']['price']}
+  Included services: {playbook['negotiation_levers']['included_services']}
+  Payment terms: {playbook['negotiation_levers']['payment']}
+  Schedule flexibility: {playbook['negotiation_levers']['schedule']}
+
+ESCALATION: {playbook['escalation_rule']}
+
+TECHNIQUES:
+"""
+        for t in playbook['techniques']:
+            prompt += f"  {t['name']}: {t['how']}\n"
+
+        prompt += f"""IF REFUSED: {playbook['if_refused']['instruction']}
+IF DISCOUNT OFFERED: {playbook['if_discount_offered']['instruction']}
+STOP CONDITIONS: {', '.join(playbook['stop_conditions'])}
+
+ETHICAL RULES:
+  Never: {', '.join(playbook['ethical_rules']['never'])}
+  Always: {', '.join(playbook['ethical_rules']['always'])}
+
+DECISION RULES: {playbook['decision_rules']}
+
+CLOSING: {playbook['closing']['instruction']}
+Example: {playbook['closing']['example']}
+
+IMPORTANT: At the very end, output a JSON block with:
+{', '.join(playbook['fields_to_record'])}
+
+{company_info}
+"""
+        return prompt
+
+def _cleanup(self) -> None:
         if self._summary["transcript_segments"]:
             full = " ".join(s["text"] for s in self._summary["transcript_segments"])
             m = re.search(r"\$(\d{2,4})(?:\.(\d{2}))?", full)

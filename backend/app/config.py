@@ -46,7 +46,10 @@ class Settings(BaseSettings):
 
     # --- Discovery levers ---
     max_companies_per_search: int = 10
-    search_query_template: str = "residential moving company in {city}"
+    search_query_template: str = "{city} moving company phone number"
+
+    # --- Test / dev levers ---
+    twilio_test_phone: str = ""  # call this number instead of discovered leads (free trial)
 
     # --- Calling levers ---
     respect_working_hours: bool = True
