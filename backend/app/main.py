@@ -74,7 +74,7 @@ async def media_stream(websocket: WebSocket, company_name: str = "Provider"):
 # (e.g., "wss://abc123.ngrok.io") so Twilio can reach your server.
 # ---------------------------------------------------------------------------
 
-@app.get("/twiml/{company_name:path}", response_class=PlainTextResponse)
+@app.api_route("/twiml/{company_name:path}", methods=["GET", "POST"], response_class=PlainTextResponse)
 async def twiml(
     company_name: str = "Provider",
     wss_url: str = Query(
