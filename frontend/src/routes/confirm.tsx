@@ -74,6 +74,7 @@ function ConfirmPage() {
   const [submitting, setSubmitting] = useState(false);
   const [jobSpecId, setJobSpecId] = useState<string | null>(null);
   const [distanceMiles, setDistanceMiles] = useState<number | null>(null);
+  const [distanceUnavailable, setDistanceUnavailable] = useState(false);
 
   const set = <K extends keyof Spec>(k: K, v: Spec[K]) => setSpec((s) => ({ ...s, [k]: v }));
 
@@ -88,6 +89,8 @@ function ConfirmPage() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
+    setDistanceMiles(null);
+    setDistanceUnavailable(false);
     try {
       const created = await createSpec(spec);
       setJobSpecId(created.job_spec_id);
@@ -103,19 +106,28 @@ function ConfirmPage() {
     }
   };
 
-  // Poll for distance_miles until backend populates it.
+  // Poll for distance_miles up to 5 attempts (~5 seconds).
   useEffect(() => {
     if (!jobSpecId || distanceMiles != null) return;
+    let attempts = 0;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     const tick = async () => {
+      attempts++;
       const s = await getSpec(jobSpecId);
       if (cancelled) return;
-      if (s.distance_miles != null) setDistanceMiles(s.distance_miles);
-      else setTimeout(tick, 1000);
+      if (s.distance_miles != null) {
+        setDistanceMiles(s.distance_miles);
+      } else if (attempts >= 5) {
+        setDistanceUnavailable(true);
+      } else {
+        timeoutId = setTimeout(tick, 1000);
+      }
     };
     tick();
     return () => {
       cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [jobSpecId, distanceMiles]);
 
@@ -148,7 +160,11 @@ function ConfirmPage() {
           <div className="text-sm text-muted-foreground">
             Distance:{" "}
             <span className="font-medium text-foreground">
-              {distanceMiles == null ? "calculating…" : `${distanceMiles} miles`}
+              {distanceUnavailable
+                ? "Distance unavailable — please set both map pins"
+                : distanceMiles == null
+                ? "calculating…"
+                : `${distanceMiles} miles`}
             </span>
           </div>
         </div>
