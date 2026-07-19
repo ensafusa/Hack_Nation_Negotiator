@@ -1,7 +1,7 @@
-﻿"""
-WebSocket Media Stream Bridge -- Twilio <-> Whisper STT <-> GPT-4o <-> ElevenLabs TTS.
 
-Real-time voice engine. Four concurrent asyncio tasks per call.
+"""
+WebSocket Media Stream Bridge --- Twilio <-> Whisper STT <-> GPT-4o <-> ElevenLabs TTS.
+Real-time voice engine. One call = one StreamHandler = 4 concurrent asyncio tasks.
 """
 
 from __future__ import annotations
@@ -25,21 +25,17 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-TWILIO_SAMPLE_RATE  = 8000
-PCM_SAMPLE_RATE     = 16000
-PCM_SAMPLE_WIDTH    = 2
+TWILIO_SAMPLE_RATE = 8000
+PCM_SAMPLE_RATE = 16000
+PCM_SAMPLE_WIDTH = 2
 ELEVENLABS_SAMPLE_RATE = 22050
 WHISPER_MODEL = "whisper-1"
-GPT_MODEL     = "gpt-4o"
+GPT_MODEL = "gpt-4o"
 
 SYSTEM_PROMPT = (
     "You are an AI negotiator calling a home-improvement provider on behalf of "
     "a customer. Be polite, professional and persistent. Identify yourself as an "
-    "AI if asked; never claim to be human. Keep responses short - one or two "
+    "AI if asked; never claim to be human. Keep responses short --- one or two "
     "sentences. After you get a price, ask if there is flexibility. If they "
     "will not budge, accept, thank them, and end with a clear summary."
 )
@@ -55,9 +51,8 @@ except ModuleNotFoundError:
 
 
 def ulaw_to_pcm(ulaw_bytes: bytes) -> bytes:
-    lin_8k  = audioop.ulaw2lin(ulaw_bytes, 2)
-    lin_16k = audioop.ratecv(lin_8k, 2, 1, TWILIO_SAMPLE_RATE, PCM_SAMPLE_RATE, None)[0]
-    return lin_16k
+    lin_8k = audioop.ulaw2lin(ulaw_bytes, 2)
+    return audioop.ratecv(lin_8k, 2, 1, TWILIO_SAMPLE_RATE, PCM_SAMPLE_RATE, None)[0]
 
 
 def lin22050_to_ulaw8000(pcm_22050: bytes) -> bytes:
@@ -75,6 +70,10 @@ def _rms_energy(pcm_16: bytes) -> float:
     peak = float(np.abs(arr).max()) or 1.0
     return float(np.sqrt(np.mean(arr ** 2))) / peak
 
+
+# ---------------------------------------------------------------------------
+# VAD Buffer
+# ---------------------------------------------------------------------------
 
 class VADBuffer:
     def __init__(self) -> None:
@@ -98,11 +97,9 @@ class VADBuffer:
         if self._silence >= settings.vad_silence_frames_max:
             return True
         dur = len(self._buf) / (PCM_SAMPLE_RATE * PCM_SAMPLE_WIDTH)
-        if dur >= settings.vad_max_buffer_secs:
-            return True
-        return False
+        return dur >= settings.vad_max_buffer_secs
 
-    def flush(self) -> Optional[bytes]:
+    def flush(self):
         if not self._buf:
             return None
         d = bytes(self._buf)
@@ -124,18 +121,18 @@ class VADBuffer:
 class TTSSession:
     def __init__(self) -> None:
         self.ws: Any = None
-        self.audio_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+        self.audio_queue: asyncio.Queue = asyncio.Queue()
         self._connected = False
         self._bos_needed = True
         self._ws_dead = False
 
     async def connect(self) -> None:
         url = (
-            f"wss://api.elevenlabs.io/v1/text-to-speech/"
-            f"{settings.elevenlabs_voice_id}"
-            f"/stream-input?model_id=eleven_turbo_v2_5"
-            f"&optimize_streaming_latency=4"
-            f"&output_format=pcm_22050"
+            "wss://api.elevenlabs.io/v1/text-to-speech/"
+            + settings.elevenlabs_voice_id
+            + "/stream-input?model_id=eleven_turbo_v2_5"
+            + "&optimize_streaming_latency=4"
+            + "&output_format=pcm_22050"
         )
         self.ws = await websockets.connect(url)
         self._connected = True
@@ -152,7 +149,7 @@ class TTSSession:
                 pass
         await self.audio_queue.put(None)
 
-    async def speak_chunk(self, text: str) -> None:
+    async def speak_chunk(self, text: str, flush: bool = False) -> None:
         if not self._connected:
             raise RuntimeError("TTS not connected")
         if self._bos_needed:
@@ -162,14 +159,14 @@ class TTSSession:
                 "xi_api_key": settings.elevenlabs_api_key,
             }))
             self._bos_needed = False
-        await self.ws.send(json.dumps({
-            "text": text,
-            "try_trigger_generation": True,
-        }))
+        msg = {"text": text, "try_trigger_generation": True}
+        if flush:
+            msg["flush"] = True
+        await self.ws.send(json.dumps(msg))
 
     async def end_utterance(self) -> None:
         if self._connected:
-            await self.ws.send(json.dumps({"text": ""}))
+            await self.ws.send(json.dumps({"text": " ", "flush": True}))
         self._bos_needed = True
 
     async def interrupt(self) -> None:
@@ -203,11 +200,11 @@ class TTSSession:
 
 
 # ---------------------------------------------------------------------------
-# Phrase-boundary helper
+# Phrase boundary
 # ---------------------------------------------------------------------------
 
 _SENTENCE_END = frozenset(".!?\n")
-_CLAUSE_END   = frozenset(",;:-")
+_CLAUSE_END = frozenset(",;:-")
 
 
 def _is_phrase_boundary(text: str) -> bool:
@@ -224,67 +221,56 @@ def _is_phrase_boundary(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# StreamHandler -- one Twilio call
+# StreamHandler
 # ---------------------------------------------------------------------------
 
 class StreamHandler:
     def __init__(
-        self,
-        websocket: WebSocket,
-        stream_sid: str,
-        call_sid: str,
-        company_name: str = "Provider",
-        service_description: str = "home improvement services",
-    ) -> None:
-        self.ws            = websocket
-        self.stream_sid    = stream_sid
-        self.call_sid      = call_sid
-        self.company       = company_name
-        self.service       = service_description
+        self, websocket, stream_sid, call_sid,
+        company_name="Provider", service_description="home improvement services",
+    ):
+        self.ws = websocket
+        self.stream_sid = stream_sid
+        self.call_sid = call_sid
+        self.company = company_name
+        self.service = service_description
 
-        self.vad           = VADBuffer()
-        self.tts: Optional[TTSSession] = None
-        self._openai       = AsyncOpenAI(api_key=settings.openai_api_key)
-
+        self.vad = VADBuffer()
+        self.tts = None
+        self._openai = AsyncOpenAI(api_key=settings.openai_api_key)
         self._history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        self._running      = True
+        self._running = True
 
-        self._playing      = False
-        self._sending      = asyncio.Event()
-        self._drained      = asyncio.Event()
+        self._playing = False
+        self._sending = asyncio.Event()
+        self._drained = asyncio.Event()
         self._drained.set()
         self._last_audio_sent: float = 0.0
-        self._resp_task: Optional[asyncio.Task] = None
+        self._resp_task = None
         self._intr_frames = 0
 
-        self._summary: dict[str, Any] = {
-            "transcript_segments": [],
-            "final_price": None,
-            "outcome": "unknown",
+        self._summary: dict = {
+            "transcript_segments": [], "final_price": None, "outcome": "unknown",
         }
 
-    # -- Public entry --
+    # ---- Public entry ----
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self) -> dict:
         self.tts = TTSSession()
         try:
             await self.tts.connect()
         except Exception:
-            logger.exception(f"[{self.company}] TTS connect failed -- check ELEVENLABS_API_KEY")
+            logger.exception("[%s] TTS connect failed --- check ELEVENLABS_API_KEY", self.company)
             self.tts = None
 
-        recv = None
-        send = None
-        if self.tts:
-            recv = asyncio.create_task(self._tts_receive_loop())
-            send = asyncio.create_task(self._send_loop())
-
+        recv = asyncio.create_task(self._tts_receive_loop()) if self.tts else None
+        send = asyncio.create_task(self._send_loop()) if self.tts else None
         try:
             await self._twilio_loop()
         except WebSocketDisconnect:
-            logger.info(f"[{self.company}] WebSocket disconnect")
+            logger.info("[%s] WebSocket disconnect", self.company)
         except Exception:
-            logger.exception(f"[{self.company}] stream fatal")
+            logger.exception("[%s] stream fatal", self.company)
         finally:
             self._running = False
             if self.tts:
@@ -293,10 +279,9 @@ class StreamHandler:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await self._cleanup()
-
         return self._summary
 
-    # -- Twilio message loop --
+    # ---- Twilio loop ----
 
     async def _twilio_loop(self) -> None:
         while self._running:
@@ -306,48 +291,45 @@ class StreamHandler:
                 return
             msg = json.loads(raw)
             event = msg.get("event", "")
-
             if event == "connected":
                 pass
             elif event == "start":
                 self.stream_sid = msg["streamSid"]
-                self.call_sid   = msg["start"]["callSid"]
-                logger.info(f"[{self.company}] stream start  sid={self.stream_sid}")
+                self.call_sid = msg["start"]["callSid"]
+                logger.info("[%s] stream start sid=%s", self.company, self.stream_sid)
                 asyncio.create_task(self._greet())
             elif event == "media":
                 await self._on_audio(msg["media"]["payload"])
             elif event == "stop":
-                logger.info(f"[{self.company}] stream stop")
+                logger.info("[%s] stream stop", self.company)
                 self._running = False
                 return
 
     async def _greet(self) -> None:
         if not self.tts:
-            logger.warning(f"[{self.company}] TTS not available -- skipping greeting")
+            logger.warning("[%s] TTS not available --- skipping greeting", self.company)
             return
         greeting = (
-            f"Hello, I am an AI assistant calling about {self.service}. "
-            f"Am I speaking with someone from {self.company}?"
+            "Hello, I am an AI assistant calling about " + self.service + ". "
+            "Am I speaking with someone from " + self.company + "?"
         )
         await self._speak_one(greeting)
 
-    # -- Audio input --
+    # ---- Audio input ----
 
     async def _on_audio(self, b64_payload: str) -> None:
         ulaw = base64.b64decode(b64_payload)
-        pcm  = ulaw_to_pcm(ulaw)
-        now  = time.monotonic()
-
+        pcm = ulaw_to_pcm(ulaw)
+        now = time.monotonic()
         if now - self._last_audio_sent < (settings.echo_guard_ms / 1000.0):
             return
-
         energy = _rms_energy(pcm)
         speech_thresh = settings.vad_energy_threshold / 32768.0
 
         if self._playing and energy > speech_thresh:
             self._intr_frames += 1
             if self._intr_frames >= settings.interrupt_min_frames:
-                logger.info(f"[{self.company}] INTERRUPT after {self._intr_frames} frames")
+                logger.info("[%s] INTERRUPT after %d frames", self.company, self._intr_frames)
                 await self._do_interrupt()
                 self._intr_frames = 0
                 self.vad.feed(pcm)
@@ -357,7 +339,6 @@ class StreamHandler:
 
         if self._playing:
             return
-
         if self._resp_task and not self._resp_task.done():
             return
 
@@ -367,7 +348,7 @@ class StreamHandler:
             if data:
                 self._resp_task = asyncio.create_task(self._transcribe_and_respond(data))
 
-    # -- Interrupt --
+    # ---- Interrupt ----
 
     async def _do_interrupt(self) -> None:
         self._playing = False
@@ -391,20 +372,20 @@ class StreamHandler:
             "content": "You were interrupted. Acknowledge and let them speak.",
         })
 
-    # -- STT + LLM stream --
+    # ---- STT + LLM ----
 
     async def _transcribe_and_respond(self, audio_data: bytes) -> None:
         try:
             transcript = await self._whisper(audio_data)
             if not transcript or not transcript.strip():
                 return
-            logger.info(f"[{self.company}] > {transcript}")
+            logger.info("[%s] > %s", self.company, transcript)
             self._summary["transcript_segments"].append({"role": "user", "text": transcript})
             await self._llm_stream_to_tts(transcript)
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.exception(f"[{self.company}] transcribe error")
+            logger.exception("[%s] transcribe error", self.company)
 
     async def _whisper(self, pcm_data: bytes) -> str:
         buf = io.BytesIO()
@@ -419,8 +400,6 @@ class StreamHandler:
         )
         return r.text.strip()
 
-    # -- LLM streaming -> TTS --
-
     async def _llm_stream_to_tts(self, user_text: str) -> None:
         self._history.append({"role": "user", "content": user_text})
         collected: list[str] = []
@@ -428,13 +407,9 @@ class StreamHandler:
         first = True
 
         stream = await self._openai.chat.completions.create(
-            model=GPT_MODEL,
-            messages=self._history,
-            temperature=0.7,
-            max_tokens=300,
-            stream=True,
+            model=GPT_MODEL, messages=self._history,
+            temperature=0.7, max_tokens=300, stream=True,
         )
-
         try:
             async for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None
@@ -462,10 +437,11 @@ class StreamHandler:
         full = "".join(collected)
         self._history.append({"role": "assistant", "content": full})
         self._summary["transcript_segments"].append({"role": "assistant", "text": full})
-        logger.info(f"[{self.company}] < {full[:150]}")
+        logger.info("[%s] < %s", self.company, full[:150])
 
         if self.tts:
             await self.tts.end_utterance()
+            # end_utterance now keeps WS alive, so next utterance works
 
         try:
             await asyncio.wait_for(self._drained.wait(), timeout=30.0)
@@ -476,7 +452,7 @@ class StreamHandler:
         if self._is_goodbye(full):
             await self._end_call()
 
-    # -- TTS background tasks --
+    # ---- TTS background tasks ----
 
     async def _tts_receive_loop(self) -> None:
         if self.tts:
@@ -490,7 +466,6 @@ class StreamHandler:
                 if not self._running:
                     return
                 continue
-            await asyncio.wait_for(self._sending.wait(), timeout=1.0)
             if not self.tts:
                 await asyncio.sleep(0.1)
                 continue
@@ -508,8 +483,7 @@ class StreamHandler:
             payload = base64.b64encode(ulaw).decode("ascii")
             try:
                 await self.ws.send_json({
-                    "event": "media",
-                    "streamSid": self.stream_sid,
+                    "event": "media", "streamSid": self.stream_sid,
                     "media": {"payload": payload},
                 })
             except Exception:
@@ -517,7 +491,7 @@ class StreamHandler:
             self._last_audio_sent = time.monotonic()
             await asyncio.sleep(0.0)
 
-    # -- Greeting --
+    # ---- Greeting ----
 
     async def _speak_one(self, text: str) -> None:
         if not self.tts:
@@ -533,7 +507,7 @@ class StreamHandler:
             pass
         self._playing = False
 
-    # -- Call end --
+    # ---- Call end ----
 
     async def _end_call(self) -> None:
         self._running = False
@@ -546,8 +520,8 @@ class StreamHandler:
     def _is_goodbye(text: str) -> bool:
         lo = text.lower()
         return any(p in lo for p in [
-            "goodbye", "thank you for your time", "have a great day",
-            "thanks for your help",
+            "goodbye", "thank you for your time",
+            "have a great day", "thanks for your help",
         ])
 
     async def _cleanup(self) -> None:
@@ -568,13 +542,10 @@ async def handle_media_stream(
     websocket: WebSocket,
     company_name: str = "Provider",
     service_description: str = "home improvement services",
-) -> dict[str, Any]:
+):
     await websocket.accept()
     handler = StreamHandler(
-        websocket=websocket,
-        stream_sid="",
-        call_sid="",
-        company_name=company_name,
-        service_description=service_description,
+        websocket=websocket, stream_sid="", call_sid="",
+        company_name=company_name, service_description=service_description,
     )
     return await handler.run()
