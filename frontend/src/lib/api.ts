@@ -1,6 +1,6 @@
 // Mock/real API module. Switching backends only requires editing these two constants:
-export const API_BASE_URL = "/api";
-const USE_MOCK = true;
+export const API_BASE_URL = "http://127.0.0.1:8000/api";
+const USE_MOCK = false;
 
 const NETWORK_DELAY_MS = 800;
 const DISTANCE_DELAY_MS = 3000;
@@ -76,6 +76,17 @@ export async function getSpec(id: string): Promise<JobSpec> {
   return res.json();
 }
 
+export async function confirmSpec(id: string): Promise<JobSpec> {
+  if (USE_MOCK) return mockConfirmSpec(id);
+
+  const res = await fetch(
+    `${API_BASE_URL}/specs/${encodeURIComponent(id)}/confirm`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`confirmSpec failed: ${res.status}`);
+  return res.json();
+}
+
 export async function getResults(id: string): Promise<Report> {
   if (USE_MOCK) return mockGetResults(id);
 
@@ -147,6 +158,30 @@ async function mockGetSpec(id: string): Promise<JobSpec> {
     return updated;
   }
   return spec;
+}
+
+async function mockConfirmSpec(id: string): Promise<JobSpec> {
+  await delay(NETWORK_DELAY_MS);
+  const spec = specStore.get(id);
+  if (!spec) throw new Error(`Spec ${id} not found`);
+  const hasCoords =
+    spec.origin_lat != null &&
+    spec.origin_lng != null &&
+    spec.destination_lat != null &&
+    spec.destination_lng != null;
+  const miles =
+    spec.distance_miles ??
+    (hasCoords
+      ? haversineMiles(
+          spec.origin_lat as number,
+          spec.origin_lng as number,
+          spec.destination_lat as number,
+          spec.destination_lng as number,
+        ) || 45
+      : 45);
+  const updated = { ...spec, distance_miles: miles };
+  specStore.set(id, updated);
+  return updated;
 }
 
 const mockCompanies: Array<{
