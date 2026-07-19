@@ -126,10 +126,10 @@ function TopNav() {
         </Link>
         <nav className="flex items-center gap-1">
           <Link to="/voice-intake" className={linkBase} activeProps={active}>
-            Voice Intake
+            Voice Intake (Live)
           </Link>
           <Link to="/voice" className={linkBase} activeProps={active}>
-            Voice Intake
+            Voice Intake (Review Demo)
           </Link>
           <Link to="/confirm" className={linkBase} activeProps={active}>
             Confirm Spec
