@@ -32,6 +32,22 @@ Returns a `JobSpec` object:
 
 ---
 
+## 1.1 Document Intake — `POST /api/specs/from-document`
+
+The second required intake path (alongside voice interview) — a photo of an existing quote, inventory list, etc. `multipart/form-data`, one field: `file` (image). No `job_spec_id` in the request — one is generated. Returns the same `JobSpec` shape as above, with `source: "document_upload"`.
+
+**Important:** fields not visible in the photo come back as safe-but-empty defaults (`""` for addresses/move_date, `1` for num_trips, `0` for num_bags, `null` for notes) — never guessed. This spec is **not ready to confirm as-is** if the photo was incomplete; show it to the user as an editable draft (same UI as the manual form) so they can fill gaps before calling `/confirm`. This matches how the voice-interview path also requires user confirmation before use.
+
+Example request (JS):
+```js
+const formData = new FormData();
+formData.append("file", fileInput.files[0]);
+const res = await fetch(`${API_BASE_URL}/specs/from-document`, { method: "POST", body: formData });
+const spec = await res.json(); // same JobSpec shape, prefill your form with it
+```
+
+---
+
 ## 1.5 Discovery — `POST /api/search/find-movers/{job_spec_id}`
 
 No query parameters, no body. The only location input the pipeline needs is `origin_address`, already on the confirmed job spec — city is detected from it server-side. Returns:
