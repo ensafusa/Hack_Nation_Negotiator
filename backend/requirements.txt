@@ -1,11 +1,15 @@
 fastapi
 uvicorn[standard]
+httpx
 tavily-python
 elevenlabs
 twilio
 openai
 pydantic-settings
 python-multipart
+pymupdf
+pytest
+pytest-asyncio
 tzdata
 websockets
 numpy
