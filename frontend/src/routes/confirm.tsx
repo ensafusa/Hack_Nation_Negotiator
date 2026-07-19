@@ -1,7 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ClientOnly } from "@tanstack/react-router";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { createElement, lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { createSpec, getSpec, confirmSpec } from "@/lib/api";
+
+const ELEVENLABS_SCRIPT_SRC = "https://elevenlabs.io/convai-widget/index.js";
+const ELEVENLABS_AGENT_ID = "agent_1301kxwfxc93e9nsct5kdekedv8x";
 
 const LeafletMap = lazy(() => import("@/components/LeafletMap"));
 
@@ -67,11 +70,59 @@ function Label({ children }: { children: React.ReactNode }) {
 const inputCls =
   "mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring";
 
+// Shared Nominatim forward-geocode: used for manual typing, voice-assistant fills,
+// and document_upload parsed addresses. Updates the pin lat/lng on the spec.
+async function geocodeAndSetPin(
+  kind: PinKind,
+  address: string,
+  setSpec: React.Dispatch<React.SetStateAction<Spec>>,
+) {
+  try {
+    console.log(`[geocode] forward ${kind} →`, address);
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`,
+      { headers: { Accept: "application/json" } },
+    );
+    console.log(`[geocode] forward ${kind} status`, res.status);
+    if (!res.ok) return;
+    const data = (await res.json()) as Array<{ lat: string; lon: string }>;
+    if (!data.length) {
+      console.warn(`[geocode] forward ${kind}: no results for`, address);
+      return;
+    }
+    const lat = parseFloat(data[0].lat);
+    const lng = parseFloat(data[0].lon);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+    setSpec((s) => {
+      if (kind === "origin") {
+        if (s.origin_lat === lat && s.origin_lng === lng) return s;
+        console.log("[geocode] origin pin updated", { lat, lng });
+        return { ...s, origin_lat: lat, origin_lng: lng };
+      }
+      if (s.destination_lat === lat && s.destination_lng === lng) return s;
+      console.log("[geocode] destination pin updated", { lat, lng });
+      return { ...s, destination_lat: lat, destination_lng: lng };
+    });
+  } catch (err) {
+    console.warn(`[geocode] forward ${kind} failed`, err);
+  }
+}
+
 
 function ConfirmPage() {
   const [spec, setSpec] = useState<Spec>(initialSpec);
+  const [mode, setMode] = useState<"voice" | "manual">("voice");
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (document.querySelector(`script[src="${ELEVENLABS_SCRIPT_SRC}"]`)) return;
+    const s = document.createElement("script");
+    s.src = ELEVENLABS_SCRIPT_SRC;
+    s.async = true;
+    document.body.appendChild(s);
+  }, []);
   const [jobSpecId, setJobSpecId] = useState<string | null>(null);
   const [distanceMiles, setDistanceMiles] = useState<number | null>(null);
   const [distanceUnavailable, setDistanceUnavailable] = useState(false);
@@ -114,37 +165,15 @@ function ConfirmPage() {
     }
   }, []);
 
-  // Debounced forward-geocoding: when the user types an address, look it up and move the pin.
+  // Debounced forward-geocoding: whenever origin_address / destination_address change
+  // — whether the user typed them, the voice assistant filled them in, or a parsed
+  // document populated them (source: "document_upload") — look the address up on
+  // Nominatim and move the corresponding map pin + lat/lng.
   useEffect(() => {
     const address = spec.origin_address.trim();
     if (!address) return;
-    const handle = setTimeout(async () => {
-      try {
-        console.log("[geocode] forward origin →", address);
-        const res = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`,
-          { headers: { Accept: "application/json" } },
-        );
-        console.log("[geocode] forward origin status", res.status);
-        if (!res.ok) return;
-        const data = (await res.json()) as Array<{ lat: string; lon: string }>;
-        console.log("[geocode] forward origin data", data);
-        if (!data.length) {
-          console.warn("[geocode] forward origin: no results for", address);
-          return;
-        }
-        const lat = parseFloat(data[0].lat);
-        const lng = parseFloat(data[0].lon);
-        if (Number.isNaN(lat) || Number.isNaN(lng)) return;
-        setSpec((s) => {
-          if (s.origin_lat === lat && s.origin_lng === lng) return s;
-          const next = { ...s, origin_lat: lat, origin_lng: lng };
-          console.log("[geocode] origin pin updated", { lat, lng });
-          return next;
-        });
-      } catch (err) {
-        console.warn("[geocode] forward origin failed", err);
-      }
+    const handle = setTimeout(() => {
+      geocodeAndSetPin("origin", address, setSpec);
     }, 800);
     return () => clearTimeout(handle);
   }, [spec.origin_address]);
@@ -152,36 +181,12 @@ function ConfirmPage() {
   useEffect(() => {
     const address = spec.destination_address.trim();
     if (!address) return;
-    const handle = setTimeout(async () => {
-      try {
-        console.log("[geocode] forward destination →", address);
-        const res = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`,
-          { headers: { Accept: "application/json" } },
-        );
-        console.log("[geocode] forward destination status", res.status);
-        if (!res.ok) return;
-        const data = (await res.json()) as Array<{ lat: string; lon: string }>;
-        console.log("[geocode] forward destination data", data);
-        if (!data.length) {
-          console.warn("[geocode] forward destination: no results for", address);
-          return;
-        }
-        const lat = parseFloat(data[0].lat);
-        const lng = parseFloat(data[0].lon);
-        if (Number.isNaN(lat) || Number.isNaN(lng)) return;
-        setSpec((s) => {
-          if (s.destination_lat === lat && s.destination_lng === lng) return s;
-          const next = { ...s, destination_lat: lat, destination_lng: lng };
-          console.log("[geocode] destination pin updated", { lat, lng });
-          return next;
-        });
-      } catch (err) {
-        console.warn("[geocode] forward destination failed", err);
-      }
+    const handle = setTimeout(() => {
+      geocodeAndSetPin("destination", address, setSpec);
     }, 800);
     return () => clearTimeout(handle);
   }, [spec.destination_address]);
+
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -196,7 +201,11 @@ function ConfirmPage() {
         destination_lng: spec.destination_lng,
         full: spec,
       });
-      const created = await createSpec(spec);
+      const submitSpec: Spec = {
+        ...spec,
+        source: mode === "voice" ? "voice_interview" : "document_upload",
+      };
+      const created = await createSpec(submitSpec);
       setJobSpecId(created.job_spec_id);
       if (typeof window !== "undefined") {
         window.localStorage.setItem("negotiator.job_spec_id", created.job_spec_id);
@@ -246,6 +255,57 @@ function ConfirmPage() {
         </p>
       </div>
 
+      <div className="mb-6 inline-flex rounded-md border border-border bg-card p-1">
+        <button
+          type="button"
+          onClick={() => setMode("voice")}
+          className={`px-4 py-2 text-sm font-medium rounded ${
+            mode === "voice"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Talk to our assistant
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("manual")}
+          className={`px-4 py-2 text-sm font-medium rounded ${
+            mode === "manual"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Fill out manually
+        </button>
+      </div>
+
+      {mode === "voice" && (
+        <div className="mb-6 rounded-lg border border-border bg-card p-6">
+          <h2 className="text-lg font-semibold text-foreground">Talk to our assistant</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Our voice assistant will interview you about your move. Your answers populate the same
+            spec below — switch to “Fill out manually” anytime to review and edit.
+          </p>
+          <div className="mt-4">
+            {createElement("elevenlabs-convai", { "agent-id": ELEVENLABS_AGENT_ID })}
+          </div>
+          <div className="mt-6 flex items-center justify-between border-t border-border pt-4">
+            <p className="text-xs text-muted-foreground">
+              Once you're done chatting, confirm to send the spec to the Negotiator.
+            </p>
+            <button
+              type="button"
+              onClick={() => onSubmit({ preventDefault: () => {} } as React.FormEvent)}
+              disabled={submitting}
+              className="inline-flex items-center justify-center rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            >
+              {submitting ? "Submitting…" : "Confirm Spec"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {confirmed && (
         <div className="mb-6 rounded-md border border-primary/30 bg-accent px-4 py-3 text-sm text-primary">
           Spec confirmed. Job ID: <span className="font-mono">{jobSpecId}</span>. The Negotiator will start calling movers.
@@ -253,12 +313,15 @@ function ConfirmPage() {
       )}
 
 
-      <form onSubmit={onSubmit} className="space-y-6 rounded-lg border border-border bg-card p-6">
+      <form
+        onSubmit={onSubmit}
+        className={`space-y-6 rounded-lg border border-border bg-card p-6 ${mode === "voice" ? "hidden" : ""}`}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-xs uppercase tracking-wide text-muted-foreground">Source</span>
             <span className="inline-flex items-center rounded-full border border-primary/30 bg-accent px-2.5 py-0.5 text-xs font-medium text-primary">
-              {spec.source}
+              {mode === "voice" ? "voice_interview" : "document_upload"}
             </span>
           </div>
           <div className="text-sm text-muted-foreground">
